@@ -18,7 +18,7 @@ try:
     from yaml import CLoader as Loader, CDumper as Dumper
 except ImportError:
     from yaml import Loader, Dumper
-
+import pathlib
 
 def OrderedYaml():
     '''yaml orderedDict support'''
@@ -50,7 +50,7 @@ def mkdir(path):
 
 
 def mkdirs(paths):
-    if isinstance(paths, str):
+    if isinstance(paths, str) or isinstance(paths, pathlib.Path):
         mkdir(paths)
     else:
         for path in paths:

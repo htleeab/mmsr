@@ -2,6 +2,7 @@ experiments/*
 results/*
 tb_logger/*
 datasets/*
+video
 .vscode
 
 *.html
