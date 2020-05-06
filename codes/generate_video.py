@@ -1,10 +1,9 @@
 '''
-This script is used for generate video or images sequence from video
-please install required pretrained models under experiments/pretrained_models
+Generate video or images sequence from video
+Please download required pretrained models under experiments/pretrained_models
 
 reference: https://github.com/btahir/deoldify_and_edvr/blob/master/DeOldify_EDVR_Combined.ipynb
 modification: Vivian LEE
-Possible improvement: frame-by-frame without writing frame to disk, multi-GPU support
 '''
 
 import os
@@ -45,7 +44,6 @@ def clean_mem():
 
 
 def get_fps(source_path: Path) -> str:
-    print(source_path)
     probe = ffmpeg.probe(str(source_path))
     stream_data = next(
         (stream for stream in probe['streams'] if stream['codec_type'] == 'video'),
@@ -86,37 +84,16 @@ def extract_raw_frames(source_path: Path, resolution: tuple):
     inframes_folder = inframes_root / (source_path.stem)
     inframes_folder.mkdir(parents=True, exist_ok=True)
     inframe_path_template = str(inframes_folder / ('%5d.' + img_format))
-    if len(os.listdir(inframes_folder)) == get_frame_count(source_path):
+    # ffmpeg might generate an extra frame. might be de-interlaced?
+    if abs(len(os.listdir(inframes_folder)) - get_frame_count(source_path)) <= 1:
         print(f'frame of {source_path} has been extracted already, skip')
     else:
-        print(
-            f'{inframes_folder}: {len(os.listdir(inframes_folder))} == {get_frame_count(source_path)}'
-        )
         purge_images(inframes_folder)
         resolution_str = ':'.join([str(x) for x in resolution])
         subprocess.call(
             f'ffmpeg -y -i {str(source_path)} -s {resolution_str} -f image2'
             f' -pix_fmt rgb24 -c:v {img_vcodec} {inframe_path_template}', shell=True)
     return inframes_folder
-
-
-def make_subfolders(img_path_l, chunk_size):
-    subFolderList = []
-    source_img_path = inframes_root / 'video_subfolders'
-    source_img_path.mkdir(parents=True, exist_ok=True)
-    for i, img in enumerate(img_path_l):
-        if i % chunk_size == 0:
-            img_path = source_img_path / str(i)
-            img_path.mkdir(parents=True, exist_ok=True)
-            subFolderList.append(str(img_path))
-        img_name = osp.basename(img)
-        img_path_name = img_path / img_name
-        shutil.copyfile(img, img_path_name)
-    return subFolderList
-
-
-def remove_subfolders():
-    shutil.rmtree(inframes_root / 'video_subfolders', ignore_errors=True, onerror=None)
 
 
 def get_pretrained_model_path(data_mode, stage):
@@ -159,55 +136,53 @@ def edvrPredict(data_mode, stage, chunk_size, test_dataset_folder, save_folder):
     stage = 1 or 2, use two stage strategy for REDS dataset.
     chunk_size = number of images within sub-folder, handle when to clean memory
     '''
-    # model config
+    ## model config
     N_in = 7 if data_mode == 'Vid4' else 5  # use N_in images to restore one HR image
     HR_in = stage == 2 or data_mode in ['blur', 'blur_comp']
     back_RBs = 40 if stage == 1 else 20
     predeblur = 'blur' in data_mode  # True if blur_bicubic | blur | blur_comp
     model_path = get_pretrained_model_path(data_mode, stage)
 
-    # set up the models
+    ## set up the models
     model = EDVR_arch.EDVR(128, N_in, 8, 5, back_RBs, predeblur=predeblur, HR_in=HR_in)
     model.load_state_dict(torch.load(model_path), strict=True)
     model.eval()
     model = model.to(device)
 
-    # generate output image
-    preProcess_multiple_factor = 16 if predeblur else 4
-    padding = 'new_info' if data_mode in ('Vid4',
-                                          'sharp_bicubic') else 'replicate'  # temporal padding mode
-
-    util.mkdirs(save_folder)
-    remove_subfolders()  # remove old video_subfolder if exists
-
-    img_path_l = sorted(glob.glob(osp.join(test_dataset_folder, '*')))
+    ## data pre-processing setup
     util.mkdirs(save_folder)
     purge_images(save_folder)
 
-    preProcess(img_path_l, preProcess_multiple_factor)
-    # probably do not have enough memory to load all frames, parse video frames into subfolders for loading frame with read_img_seq function
-    # TODO: pass list of image to data_util.read_img_seq instead of using subfolder
-    subFolderList = make_subfolders(img_path_l, chunk_size)
+    img_path_l = sorted(glob.glob(osp.join(test_dataset_folder, '*')))
 
+    preProcess_multiple_factor = 16 if predeblur else 4
+    preProcess(img_path_l, preProcess_multiple_factor)
+    padding = 'new_info' if data_mode in ('Vid4', 'sharp_bicubic') else 'replicate'
+
+    ## Feed image sequence into model, predict output
     with tqdm(total=len(img_path_l)) as pbar:
         frame_num = 0
-        #### read images in chunks, clean memory after each chunk
-        for subSubFolder in subFolderList:
+        # probably do not have enough memory to load all frames
+        # parse video frames by chunk size for loading frames with read_img_seq function
+        parsed_img_list = []
+        for i in range(0, len(img_path_l), chunk_size):
+            parsed_img_list.append(img_path_l[i:i + chunk_size])
+        # fixme: the frames near parse point is not continues, might need to overlap those frame and adjust select idx for completely continuous inference
+        for images_chunk in parsed_img_list:
             clean_mem()
-            imgs_LQ = data_util.read_img_seq(subSubFolder)
-            subSubFolder_l = sorted(glob.glob(osp.join(subSubFolder, '*')))
-            max_idx = len(subSubFolder_l)
+            imgs_LQ = data_util.read_img_seq(images_chunk)
+            max_idx = len(images_chunk)
 
             # process each image
-            for img_idx, img_path in enumerate(subSubFolder_l):
+            for img_idx, img_path in enumerate(images_chunk):
                 with open('offset_mean.log', 'a') as file:
                     file.write(f'[generate_video.py] forwarding frame {frame_num}\n')
 
                 img_name = osp.splitext(osp.basename(img_path))[0]
                 select_idx = data_util.index_generation(img_idx, max_idx, N_in, padding=padding)
+                # Take reference image with n neighbor frames
                 imgs_in = imgs_LQ.index_select(0,
                                                torch.LongTensor(select_idx)).unsqueeze(0).to(device)
-
                 output = util.single_forward(model, imgs_in)
                 output = util.tensor2img(output.squeeze(0))
 
