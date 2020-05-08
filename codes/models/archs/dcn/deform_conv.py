@@ -11,6 +11,13 @@ from . import deform_conv_cuda
 
 logger = logging.getLogger('base')
 
+VISUALIZE_OFFSET = True
+if VISUALIZE_OFFSET:
+    import os, glob
+    import torchvision
+    OFFSET_IMG_DIR = '../video/offset'
+    VISUALIZE_OFFSET_PER_GROUP = True
+
 
 class DeformConvFunction(Function):
     @staticmethod
@@ -256,7 +263,7 @@ class ModulatedDeformConv(nn.Module):
 
 
 class ModulatedDeformConvPack(ModulatedDeformConv):
-    def __init__(self, *args, extra_offset_mask=False, **kwargs):
+    def __init__(self, *args, extra_offset_mask=False, layer_name='', **kwargs):
         super(ModulatedDeformConvPack, self).__init__(*args, **kwargs)
 
         self.extra_offset_mask = extra_offset_mask
@@ -266,6 +273,12 @@ class ModulatedDeformConvPack(ModulatedDeformConv):
             kernel_size=self.kernel_size, stride=_pair(self.stride), padding=_pair(self.padding),
             bias=True)
         self.init_offset()
+        if VISUALIZE_OFFSET:
+            self.offset_output_folder = os.path.join(OFFSET_IMG_DIR, layer_name)
+            os.makedirs(self.offset_output_folder)
+            if VISUALIZE_OFFSET_PER_GROUP:
+                for i in range(0, self.deformable_groups):
+                    os.makedirs(os.path.join(self.offset_output_folder, str(i)))
 
     def init_offset(self):
         self.conv_offset_mask.weight.data.zero_()
@@ -278,6 +291,7 @@ class ModulatedDeformConvPack(ModulatedDeformConv):
             x = x[0]
         else:
             out = self.conv_offset_mask(x)
+        # out [1, C, H, W], C= deformable group x 3 x kernal_H x kernal_W, 3-> x,y,m
         o1, o2, mask = torch.chunk(out, 3, dim=1)
         offset = torch.cat((o1, o2), dim=1)
         mask = torch.sigmoid(mask)
@@ -285,6 +299,40 @@ class ModulatedDeformConvPack(ModulatedDeformConv):
         offset_mean = torch.mean(torch.abs(offset))
         if offset_mean > 100:
             logger.warning('Offset mean is {}, larger than 100.'.format(offset_mean))
+        if VISUALIZE_OFFSET:
+            _, C, H, W = out.shape
+            offset_view = offset.view([self.deformable_groups, 3, 3, 2, H, W])
+            offset_max = torch.max(torch.abs(offset))
+            # simply display the max of all channels 8 groups *3*3 (kernel size)
+            # offset is groups x kernel x kernel x 2 x H, W, guess from modulated_deformable_im2col_gpu_kernel
+            offset_x = torch.max(torch.abs(offset_view[:, :, :, 0, :, :]).view([-1, H, W]), dim=0)[0] / H
+            offset_y = torch.max(torch.abs(offset_view[:, :, :, 1, :, :]).view([-1, H, W]), dim=0)[0] / W
+            # Warning
+            offset_x_max_all = torch.max(offset_x)
+            offset_y_max_all = torch.max(offset_y)
+            if offset_x_max_all > H or offset_y_max_all > W:
+                logger.warning(
+                    f'Offset exceed image shape: {offset.shape}\t- offset: {offset_mean:>8.4f}\t({offset_x_max_all:>8.4f},{offset_y_max_all:>8.4f})'
+                )
+            ## save image
+            padding = torch.zeros([H, W], dtype=offset.dtype).to(offset.get_device())
+            offset_tensor_img = torch.stack([offset_x, padding, offset_y])
+            # simply append via counting frame
+            # Note: Each frame output N=5 offset image because PCD run N times per frame
+            next_index = len(glob.glob(os.path.join(self.offset_output_folder, '*.png')))
+            torchvision.utils.save_image(
+                offset_tensor_img, os.path.join(self.offset_output_folder, f'{next_index:05d}.png'))
+            if VISUALIZE_OFFSET_PER_GROUP:
+                for group_idx in range(0, self.deformable_groups):
+                    group_out_folder = os.path.join(self.offset_output_folder, str(group_idx))
+                    offset_x = torch.max(torch.abs(offset_view[group_idx, :, :, 0, :, :]).view([-1, H, W]), dim=0)[0] / H
+                    offset_y = torch.max(torch.abs(offset_view[group_idx, :, :, 1, :, :]).view([-1, H, W]), dim=0)[0] / W
+                    offset_tensor_img = torch.stack([offset_x, padding, offset_y])
+                    torchvision.utils.save_image(
+                        offset_tensor_img,
+                        os.path.join(group_out_folder,
+                                     f'{len(os.listdir(group_out_folder)):05d}.png')
+                    )
 
         return modulated_deform_conv(x, offset, mask, self.weight, self.bias, self.stride,
                                      self.padding, self.dilation, self.groups,

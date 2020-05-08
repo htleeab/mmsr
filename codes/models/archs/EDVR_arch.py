@@ -61,40 +61,45 @@ class PCD_Align(nn.Module):
     ''' Alignment module using Pyramid, Cascading and Deformable convolution
     with 3 pyramid levels.
     '''
-
     def __init__(self, nf=64, groups=8):
         super(PCD_Align, self).__init__()
         # L3: level 3, 1/4 spatial size
         self.L3_offset_conv1 = nn.Conv2d(nf * 2, nf, 3, 1, 1, bias=True)  # concat for diff
         self.L3_offset_conv2 = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
         self.L3_dcnpack = DCN(nf, nf, 3, stride=1, padding=1, dilation=1, deformable_groups=groups,
-                              extra_offset_mask=True)
+                              extra_offset_mask=True, layer_name='L3_dcnpack')
         # L2: level 2, 1/2 spatial size
         self.L2_offset_conv1 = nn.Conv2d(nf * 2, nf, 3, 1, 1, bias=True)  # concat for diff
         self.L2_offset_conv2 = nn.Conv2d(nf * 2, nf, 3, 1, 1, bias=True)  # concat for offset
         self.L2_offset_conv3 = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
         self.L2_dcnpack = DCN(nf, nf, 3, stride=1, padding=1, dilation=1, deformable_groups=groups,
-                              extra_offset_mask=True)
+                              extra_offset_mask=True, layer_name='L2_dcnpack')
         self.L2_fea_conv = nn.Conv2d(nf * 2, nf, 3, 1, 1, bias=True)  # concat for fea
         # L1: level 1, original spatial size
         self.L1_offset_conv1 = nn.Conv2d(nf * 2, nf, 3, 1, 1, bias=True)  # concat for diff
         self.L1_offset_conv2 = nn.Conv2d(nf * 2, nf, 3, 1, 1, bias=True)  # concat for offset
         self.L1_offset_conv3 = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
         self.L1_dcnpack = DCN(nf, nf, 3, stride=1, padding=1, dilation=1, deformable_groups=groups,
-                              extra_offset_mask=True)
+                              extra_offset_mask=True, layer_name='L1_dcnpack')
         self.L1_fea_conv = nn.Conv2d(nf * 2, nf, 3, 1, 1, bias=True)  # concat for fea
         # Cascading DCN
         self.cas_offset_conv1 = nn.Conv2d(nf * 2, nf, 3, 1, 1, bias=True)  # concat for diff
         self.cas_offset_conv2 = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
 
         self.cas_dcnpack = DCN(nf, nf, 3, stride=1, padding=1, dilation=1, deformable_groups=groups,
-                               extra_offset_mask=True)
+                               extra_offset_mask=True, layer_name='cas_dcnpack')
 
         self.lrelu = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 
     def forward(self, nbr_fea_l, ref_fea_l):
-        '''align other neighboring frames to the reference frame in the feature level
+        '''
+        align other neighboring frames to the reference frame in the feature level
         nbr_fea_l, ref_fea_l: [L1, L2, L3], each with [B,C,H,W] features
+        L1_fea, L2_fea, L3_fea: output of Deformable convolution module
+        L1_offset, L2_offset, L3_offset: feature for learning offset used in Deformable convolution
+        
+        Lx_dcnpack: ModulatedDeformConvPack that will apply conv2D on offset feature and output grouped offset.
+        Note: in this case, it a bit not reasonable to multiply 2 on offset feature after bilinear
         '''
         # L3
         L3_offset = torch.cat([nbr_fea_l[2], ref_fea_l[2]], dim=1)
@@ -123,7 +128,7 @@ class PCD_Align(nn.Module):
         offset = torch.cat([L1_fea, ref_fea_l[0]], dim=1)
         offset = self.lrelu(self.cas_offset_conv1(offset))
         offset = self.lrelu(self.cas_offset_conv2(offset))
-        L1_fea = self.lrelu(self.cas_dcnpack([L1_fea, offset]))
+        L1_fea = self.lrelu(self.cas_dcnpack([L1_fea, offset]))  # 1, 128, 180, 320
 
         return L1_fea
 
@@ -133,7 +138,6 @@ class TSA_Fusion(nn.Module):
     Temporal: correlation;
     Spatial: 3 pyramid levels.
     '''
-
     def __init__(self, nf=64, nframes=5, center=2):
         super(TSA_Fusion, self).__init__()
         self.center = center
@@ -163,43 +167,43 @@ class TSA_Fusion(nn.Module):
     def forward(self, aligned_fea):
         B, N, C, H, W = aligned_fea.size()  # N video frames
         #### temporal attention
-        emb_ref = self.tAtt_2(aligned_fea[:, self.center, :, :, :].clone())
-        emb = self.tAtt_1(aligned_fea.view(-1, C, H, W)).view(B, N, -1, H, W)  # [B, N, C(nf), H, W]
+        emb_ref = self.tAtt_2(aligned_fea[:, self.center, :, :, :].clone())  # [B, C, H, W], C=nf
+        emb = self.tAtt_1(aligned_fea.view(-1, C, H, W)).view(B, N, -1, H, W)
 
-        cor_l = []
+        cor_l = []  # N, B, 1, H, W
         for i in range(N):
-            emb_nbr = emb[:, i, :, :, :]
-            cor_tmp = torch.sum(emb_nbr * emb_ref, 1).unsqueeze(1)  # B, 1, H, W
+            emb_nbr = emb[:, i, :, :, :]  # [B, C, H, W]
+            cor_tmp = torch.sum(emb_nbr * emb_ref, 1).unsqueeze(1)
             cor_l.append(cor_tmp)
-        cor_prob = torch.sigmoid(torch.cat(cor_l, dim=1))  # B, N, H, W
+        cor_prob = torch.sigmoid(torch.cat(cor_l, dim=1))  # [B, N, H, W]
         cor_prob = cor_prob.unsqueeze(2).repeat(1, 1, C, 1, 1).view(B, -1, H, W)
-        aligned_fea = aligned_fea.view(B, -1, H, W) * cor_prob
+        aligned_fea = aligned_fea.view(B, -1, H, W) * cor_prob  # [B, NxC, H, W]
 
         #### fusion
-        fea = self.lrelu(self.fea_fusion(aligned_fea))
+        fea = self.lrelu(self.fea_fusion(aligned_fea))  # reduce channels from N x nf to nf
 
         #### spatial attention
-        att = self.lrelu(self.sAtt_1(aligned_fea))
+        att = self.lrelu(self.sAtt_1(aligned_fea))  # [B, C, H, W]
         att_max = self.maxpool(att)
         att_avg = self.avgpool(att)
-        att = self.lrelu(self.sAtt_2(torch.cat([att_max, att_avg], dim=1)))
+        att = self.lrelu(self.sAtt_2(torch.cat([att_max, att_avg], dim=1)))  # [B, C, H/2, W/2]
         # pyramid levels
         att_L = self.lrelu(self.sAtt_L1(att))
         att_max = self.maxpool(att_L)
         att_avg = self.avgpool(att_L)
-        att_L = self.lrelu(self.sAtt_L2(torch.cat([att_max, att_avg], dim=1)))
+        att_L = self.lrelu(self.sAtt_L2(torch.cat([att_max, att_avg], dim=1)))  # [B, C, H/4, W/4]
         att_L = self.lrelu(self.sAtt_L3(att_L))
         att_L = F.interpolate(att_L, scale_factor=2, mode='bilinear', align_corners=False)
 
         att = self.lrelu(self.sAtt_3(att))
-        att = att + att_L
+        att = att + att_L  # [B, C, H/2, W/2]
         att = self.lrelu(self.sAtt_4(att))
         att = F.interpolate(att, scale_factor=2, mode='bilinear', align_corners=False)
         att = self.sAtt_5(att)
         att_add = self.sAtt_add_2(self.lrelu(self.sAtt_add_1(att)))
         att = torch.sigmoid(att)
 
-        fea = fea * att * 2 + att_add
+        fea = fea * att * 2 + att_add  # if multiple x2 because offset shift, but att + att_L also should *2... a bit non-consistent
         return fea
 
 
@@ -295,15 +299,20 @@ class EDVR(nn.Module):
             aligned_fea.append(self.pcd_align(nbr_fea_l, ref_fea_l))
         aligned_fea = torch.stack(aligned_fea, dim=1)  # [B, N, C, H, W]
 
+        #### TSA
         if not self.w_TSA:
             aligned_fea = aligned_fea.view(B, -1, H, W)
         fea = self.tsa_fusion(aligned_fea)
 
+        #### reconstruction module: ResidualBlock_noBN
         out = self.recon_trunk(fea)
+
+        #### up-sampling
         out = self.lrelu(self.pixel_shuffle(self.upconv1(out)))
         out = self.lrelu(self.pixel_shuffle(self.upconv2(out)))
         out = self.lrelu(self.HRconv(out))
         out = self.conv_last(out)
+
         if self.HR_in:
             base = x_center
         else:

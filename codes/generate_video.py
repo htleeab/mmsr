@@ -17,6 +17,7 @@ import argparse
 import subprocess  # for run ffmpeg cmd
 
 from tqdm import tqdm
+import numpy as np
 import cv2
 from PIL import Image
 import torch
@@ -36,6 +37,8 @@ pretrained_models = Path('../experiments/pretrained_models')
 img_format = 'png'
 device = torch.device('cuda')
 img_vcodec = 'mjpeg' if img_format == 'jpg' else img_format
+
+offset_log_filepath = 'offset_mean.log'
 
 
 def clean_mem():
@@ -175,7 +178,7 @@ def edvrPredict(data_mode, stage, chunk_size, test_dataset_folder, save_folder):
 
             # process each image
             for img_idx, img_path in enumerate(images_chunk):
-                with open('offset_mean.log', 'a') as file:
+                with open(offset_log_filepath, 'a') as file:
                     file.write(f'[generate_video.py] forwarding frame {frame_num}\n')
 
                 img_name = osp.splitext(osp.basename(img_path))[0]
@@ -231,7 +234,7 @@ def encode_images(outframes_folder, output_filepath, fps):
     result_folder.mkdir(parents=True, exist_ok=True)
     subprocess.call(
         f'ffmpeg -y -f image2 -r {fps} -c:v {img_vcodec} -i "{outframes_path_template}"'
-        f' -c:v libx264 -vrf 17 "{str(output_filepath)}"', shell=True)
+        f' -c:v libx264 "{str(output_filepath)}"', shell=True)
     return output_filepath
 
 
@@ -290,6 +293,86 @@ def edvr_video(video_src_path: Path, data_mode: str, chunk_size: int, finetune_s
         shutil.rmtree(outframes_s2_root, ignore_errors=True, onerror=None)
 
 
+def pack_img(sub_imgs, row=2):
+    img_mid = int(len(sub_imgs) / row)
+    packed_img = np.concatenate(
+        [np.concatenate(sub_imgs[:img_mid], axis=0),
+         np.concatenate(sub_imgs[img_mid:], axis=0)], axis=1)
+    return packed_img
+
+
+def encode_offset_layers_within_1_video(offset_folder, video_out_filepath, fps):
+    offset_layers = sorted(os.listdir(offset_folder))
+    print(offset_layers)
+    imgs_shape = np.array([
+        cv2.imread(x).shape[:-1] for x in glob.glob(os.path.join(offset_folder, '*', '00000.png'))
+    ])
+    largest_offset_resolution = np.max(imgs_shape, axis=0)[::-1]
+    video_out = cv2.VideoWriter(video_out_filepath, cv2.VideoWriter_fourcc(*'MJPG'), fps,
+                                tuple(largest_offset_resolution * 2))
+    for frame_idx in tqdm(
+            range(0, len(glob.glob(os.path.join(offset_folder, offset_layers[0], '*.png')))),
+            desc='encode offset'):
+        frame_filename = f'{frame_idx:05d}.png'
+        offset_frames = [
+            cv2.resize(cv2.imread(os.path.join(offset_folder, offset_layer, frame_filename)),
+                       tuple(largest_offset_resolution)) for offset_layer in offset_layers
+        ]
+        cur_frame = pack_img(offset_frames)
+        video_out.write(cur_frame)
+    video_out.release()
+
+
+def encoder_offset_layers_per_group(offset_folder, video_out_filepath, fps, deformable_groups=8):
+    offset_layers = sorted(os.listdir(offset_folder))
+    imgs_shape = np.array([
+        cv2.imread(x).shape[:-1] for x in glob.glob(os.path.join(offset_folder, '*', '00000.png'))
+    ])
+    largest_offset_resolution = np.max(imgs_shape, axis=0)[::-1]
+    final_output_resolution = tuple(
+        [largest_offset_resolution[0] * 8, largest_offset_resolution[1] * 4])
+    video_out = cv2.VideoWriter(video_out_filepath, cv2.VideoWriter_fourcc(*'MJPG'), fps,
+                                final_output_resolution)
+    for frame_idx in tqdm(
+            range(0, len(glob.glob(os.path.join(offset_folder, offset_layers[0], '*.png'))))):
+        frame_filename = f'{frame_idx:05d}.png'
+        offset_layer_imgs = []
+        for offset_layer in offset_layers:
+            layer_offset_all_group = [
+                cv2.resize(
+                    cv2.imread(
+                        os.path.join(offset_folder, offset_layer, str(group_idx), frame_filename)),
+                    tuple(largest_offset_resolution)) for group_idx in range(0, deformable_groups)
+            ]
+            layer_offset_all_group_frame = np.concatenate(layer_offset_all_group, axis=1)
+            offset_layer_imgs.append(layer_offset_all_group_frame)
+        cur_frame = np.concatenate(offset_layer_imgs, axis=0)
+        video_out.write(cur_frame)
+    video_out.release()
+
+
+def handle_offset(args):
+    video_name = os.path.splitext(os.path.basename(args.input))[0]
+    offset_img_folder = '../video/offset'
+    if os.path.exists(offset_img_folder):
+        offset_folder_moved = offset_img_folder + f'_{video_name}_{args.model}'
+        while os.path.exists(offset_folder_moved):
+            offset_folder_moved += '_'
+        os.rename(offset_img_folder, offset_folder_moved)
+    else:
+        offset_folder_moved = offset_img_folder + f'_{video_name}_{args.model}'
+    if os.path.exists(offset_folder_moved):
+        fps = 25 * 5  # because PCD run 5 times per frame
+        encode_offset_layers_within_1_video(
+            offset_folder_moved, f'../video/offset_videos/offset_{video_name}_{args.model}_all.mp4',
+            fps)
+        encoder_offset_layers_per_group(
+            offset_folder_moved,
+            f'../video/offset_videos/offset_{video_name}_{args.model}_groups.mp4', fps)
+    else:
+        print(f'no offset generated')
+
+
 def str2bool(v):
     # ref: https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse
     if isinstance(v, bool):
@@ -328,11 +411,15 @@ def parse_args():
 
 
 if __name__ == '__main__':
-    if os.path.exists('offset_mean.log'):
-        os.remove('offset_mean.log')
+    if os.path.exists(offset_log_filepath):
+        os.remove(offset_log_filepath)
     args = parse_args()
     if not os.path.isdir(args.input):
         edvr_video(Path(args.input), args.model, 100, args.two_stage_enabled, args.clean_frames,
                    args.resolution)
     else:
         edvr_img2vid(args.input, args.model, 100, args.two_stage_enabled, args.clean_frames)
+    if os.path.exists(offset_log_filepath):
+        video_name = os.path.splitext(os.path.basename(args.input))[0]
+        os.rename(offset_log_filepath, f'offset_log/offset_{video_name}_{args.model}.log')
+    handle_offset(args)
