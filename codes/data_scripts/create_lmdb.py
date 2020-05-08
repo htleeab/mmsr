@@ -1,8 +1,20 @@
-"""Create lmdb files for [General images (291 images/DIV2K) | Vimeo90K | REDS] training datasets"""
+"""
+Create lmdb files for [General images (291 images/DIV2K) | Vimeo90K | REDS] training datasets
+dataset = 'DIV2K_demo'  # vimeo90K | REDS | general (e.g., DIV2K, 291) | DIV2K_demo |test
+mode = 'GT'  # used for vimeo90k and REDS datasets
+# vimeo90k: GT | LR | flow
+# REDS: train_sharp, train_sharp_bicubic, train_blur_bicubic, train_blur, train_blur_comp
+#       train_sharp_flowx4
+name: for meta info
+
+
+python3 create_lmdb.py -d general_video --img_folder ../../datasets/horse/GT --lmdb_save_path ../../datasets/horse/GT.lmdb --name 'horse_GT'
+"""
 
 import sys
 import os.path as osp
 import glob
+import argparse
 import pickle
 from multiprocessing import Pool
 import numpy as np
@@ -14,22 +26,41 @@ import data.util as data_util  # noqa: E402
 import utils.util as util  # noqa: E402
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '-d', '--dataset', dest='dataset', type=str, default='general',
+        choices=['general', 'vimeo90k', 'REDS', 'DIV2K_demo', 'test', 'general_video'])
+    parser.add_argument(
+        '-m', '--mode', dest='mode', type=str, default='GT', choices=['GT', 'LR', 'flow'] + [
+            'train_sharp', 'train_sharp_bicubic', 'train_blur_bicubic', 'train_blur',
+            'train_blur_comp', 'train_sharp_flowx4'
+        ], help='used for vimeo90k and REDS datasets')
+    # below parameters for general / general_video
+    parser.add_argument('--img_folder', dest='img_folder', type=str,
+                        default='../../datasets/DIV2K/DIV2K800_sub')
+    parser.add_argument('--lmdb_save_path', dest='lmdb_save_path', type=str,
+                        default='../../datasets/DIV2K/DIV2K800_sub.lmdb')
+    parser.add_argument('--name', dest='name', type=str, default='DIV2K800_sub_GT')
+    return parser.parse_args()
+
+
 def main():
-    dataset = 'DIV2K_demo'  # vimeo90K | REDS | general (e.g., DIV2K, 291) | DIV2K_demo |test
-    mode = 'GT'  # used for vimeo90k and REDS datasets
-    # vimeo90k: GT | LR | flow
-    # REDS: train_sharp, train_sharp_bicubic, train_blur_bicubic, train_blur, train_blur_comp
-    #       train_sharp_flowx4
+    args = parse_args()
+    dataset = args.dataset
+    mode = args.mode
     if dataset == 'vimeo90k':
         vimeo90k(mode)
     elif dataset == 'REDS':
         REDS(mode)
     elif dataset == 'general':
         opt = {}
-        opt['img_folder'] = '../../datasets/DIV2K/DIV2K800_sub'
-        opt['lmdb_save_path'] = '../../datasets/DIV2K/DIV2K800_sub.lmdb'
-        opt['name'] = 'DIV2K800_sub_GT'
+        opt['img_folder'] = args.img_folder
+        opt['lmdb_save_path'] = args.lmdb_save_path
+        opt['name'] = args.name
         general_image_folder(opt)
+    elif dataset == 'general_video':
+        REDS('general_video', args)
     elif dataset == 'DIV2K_demo':
         opt = {}
         ## GT
@@ -275,7 +306,7 @@ def vimeo90k(mode):
     print('Finish creating lmdb meta info.')
 
 
-def REDS(mode):
+def REDS(mode, args=None):
     """Create lmdb for the REDS dataset, each image with a fixed size
     GT: [3, 720, 1280], key: 000_00000000
     LR: [3, 180, 320], key: 000_00000000
@@ -313,6 +344,17 @@ def REDS(mode):
         img_folder = '../../datasets/REDS/train_sharp_flowx4'
         lmdb_save_path = '../../datasets/REDS/train_sharp_flowx4.lmdb'
         H_dst, W_dst = 360, 320
+    elif mode == 'GT':
+        img_folder = '../../datasets/REDS/val'
+        lmdb_save_path = '../../datasets/REDS/val.lmdb'
+        H_dst, W_dst = 720, 1280
+    elif mode == 'general_video':
+        img_folder = args.img_folder
+        lmdb_save_path = args.lmdb_save_path
+        H_dst, W_dst = 720, 1280
+    else:
+        raise Exception(f'unknown mode {mode} for REDS')
+
     n_thread = 40
     ########################################################
     if not lmdb_save_path.endswith('.lmdb'):
