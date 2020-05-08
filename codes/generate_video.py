@@ -196,6 +196,13 @@ def edvrPredict(data_mode, stage, chunk_size, test_dataset_folder, save_folder):
     return save_folder
 
 
+def contain_audio(video_filepath):
+    result = subprocess.run(
+        f'ffmpeg -i {video_filepath} -vn -f null - 2>&1 | grep does\ not\ contain\ any\ stream',
+        shell=True, stdout=subprocess.PIPE)
+    return len(result.stdout) == 0
+
+
 def encode_video(source_path: Path, outframes_folder: Path, result_path: Path) -> Path:
     outframes_path_template = str(outframes_folder / ('%5d.' + img_format))
     result_folder.mkdir(parents=True, exist_ok=True)
@@ -205,21 +212,12 @@ def encode_video(source_path: Path, outframes_folder: Path, result_path: Path) -
     if result_path.exists():
         result_path.unlink()
 
-    # try to extract audio
-    audio_file = result_folder / (source_path.stem + '.aac')
-    if audio_file.exists():
-        audio_file.unlink()
-    subprocess.call(f'ffmpeg -y -i "{str(source_path)}" -vn -c:a copy "{str(audio_file)}"',
-                    shell=True)
-
     # encode output
-    if audio_file.exists and os.path.exists(audio_file):
-        # combine images and audio
+    if contain_audio(source_path):
         subprocess.call(
             f'ffmpeg -y -f image2 -r {fps} -c:v {img_vcodec} -i "{outframes_path_template}"'
-            f' -i "{str(audio_file)}" -c:a copy '
-            f' -c:v libx264 -b:v 3.2M "{str(result_path)}"', shell=True)
-        audio_file.unlink()
+            f' -vn -i "{str(source_path)}" '
+            f' -c:v libx264 -crf 17 "{str(result_path)}"', shell=True)
     else:
         subprocess.call(
             f'ffmpeg -y -f image2 -r {fps} -c:v {img_vcodec} -i "{outframes_path_template}"'
