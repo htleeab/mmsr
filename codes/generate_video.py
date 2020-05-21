@@ -26,13 +26,17 @@ import ffmpeg
 import utils.util as util
 import data.util as data_util
 import models.archs.EDVR_arch as EDVR_arch
+from scripts.diff_score import get_score_func
 
 workfolder = Path('../video')
 inframes_root = workfolder / "inframes"
 outframes_s1_root = workfolder / "outframes_s1"
 outframes_s2_root = workfolder / "outframes_s2"
+fix_patch_root = workfolder / "fix_patch"
 result_folder = workfolder / "result"
 pretrained_models = Path('../experiments/pretrained_models')
+
+PATCH_ARTIFACT_ENABLED = False # If true, replace the patch with source when the ssim > threshold
 
 img_format = 'png'
 device = torch.device('cuda')
@@ -40,6 +44,7 @@ img_vcodec = 'mjpeg' if img_format == 'jpg' else img_format
 
 offset_log_filepath = 'offset_mean.log'
 
+torch.backends.cudnn.benchmark = True
 
 def clean_mem():
     # torch.cuda.empty_cache()
@@ -55,19 +60,19 @@ def get_fps(source_path: Path) -> str:
     return stream_data['avg_frame_rate']
 
 
-def preProcess(imag_path_l, multiple):
+def preProcess(images_path, multiple):
     '''Need to resize images for blurred model (needs to be multiples of 4 or 16)'''
-    for img_path in imag_path_l:
-        im = Image.open(img_path)
-        h, w = im.size
-        if h % multiple == 0 and w % multiple == 0:
-            # same video, all frame have same shape, no need to check remaining frame
-            break
-        # resize so they are multiples of 4 or 16 (for blurred)
-        h = h - h % multiple
-        w = w - w % multiple
-        im = im.resize((h, w))
-        im.save(img_path)
+    ## Check shape of 1 image
+    h, w, _ = cv2.imread(images_path[0]).shape
+    assert cv2.imread(images_path[0]).shape == cv2.imread(images_path[-1]).shape, f'first frame and last frame have different shape, please clean previous frame and re-extract it'
+    if not (h % multiple == 0 and w % multiple == 0):
+        h_padding = (multiple - h % multiple) % multiple
+        w_padding = (multiple - w % multiple) % multiple
+        print(f'resolution {h}x{w} is not multiple of {multiple}, pad {h_padding, w_padding}')
+        for img_path in tqdm(images_path, desc='pre-Processing'):
+            img = cv2.imread(img_path)
+            padded_img = np.pad(img, [(0, h_padding), (0, w_padding), (0,0)])
+            cv2.imwrite(img_path, padded_img)
 
 
 def purge_images(dir):
@@ -92,9 +97,9 @@ def extract_raw_frames(source_path: Path, resolution: tuple):
         print(f'frame of {source_path} has been extracted already, skip')
     else:
         purge_images(inframes_folder)
-        resolution_str = ':'.join([str(x) for x in resolution])
+        resolution_opt = '-s' + ':'.join([str(x) for x in resolution]) if resolution[0] is not None else '' 
         subprocess.call(
-            f'ffmpeg -y -i {str(source_path)} -s {resolution_str} -f image2'
+            f'ffmpeg -y -i {str(source_path)} {resolution_opt} -f image2'
             f' -pix_fmt rgb24 -c:v {img_vcodec} {inframe_path_template}', shell=True)
     return inframes_folder
 
@@ -178,9 +183,6 @@ def edvrPredict(data_mode, stage, chunk_size, test_dataset_folder, save_folder):
 
             # process each image
             for img_idx, img_path in enumerate(images_chunk):
-                with open(offset_log_filepath, 'a') as file:
-                    file.write(f'[generate_video.py] forwarding frame {frame_num}\n')
-
                 img_name = osp.splitext(osp.basename(img_path))[0]
                 select_idx = data_util.index_generation(img_idx, max_idx, N_in, padding=padding)
                 # Take reference image with n neighbor frames
@@ -217,11 +219,11 @@ def encode_video(source_path: Path, outframes_folder: Path, result_path: Path) -
         subprocess.call(
             f'ffmpeg -y -f image2 -r {fps} -c:v {img_vcodec} -i "{outframes_path_template}"'
             f' -vn -i "{str(source_path)}" '
-            f' -c:v libx264 -crf 17 "{str(result_path)}"', shell=True)
+            f' -c:v libx264 -crf 10 "{str(result_path)}"', shell=True)
     else:
         subprocess.call(
             f'ffmpeg -y -f image2 -r {fps} -c:v {img_vcodec} -i "{outframes_path_template}"'
-            f' -c:v libx264 -b:v 3.2M "{str(result_path)}"', shell=True)
+            f' -c:v libx264 -crf 10 "{str(result_path)}"', shell=True)
 
     return result_path
 
@@ -261,6 +263,30 @@ def edvr_img2video(img_src_dir: Path, data_mode: str, chunk_size: int, finetune_
         shutil.rmtree(outframes_s1_root, ignore_errors=True, onerror=None)
         shutil.rmtree(outframes_s2_root, ignore_errors=True, onerror=None)
 
+def patch_artifact(inframe_folder, edvr_frame_folder, output_folder, patch_parse = 16, threshold=0.8):
+    os.makedirs(output_folder, exist_ok=True)
+    score_func = get_score_func('ssim')
+    for frame_filename in tqdm(sorted(os.listdir(edvr_frame_folder)), desc='patch artifact'):
+        edvr_frame = cv2.imread(os.path.join(edvr_frame_folder, frame_filename))
+        src_frame = cv2.imread(os.path.join(inframe_folder, frame_filename))
+        assert edvr_frame is not None, f'cannot read {os.path.join(edvr_frame_folder, frame_filename)}'
+        assert src_frame is not None, f'cannot read {os.path.join(inframe_folder, frame_filename)}'
+        resolution = edvr_frame.shape
+        final_frame = np.zeros(edvr_frame.shape)
+        patch_size = [int(x/patch_parse) for x in resolution[:2]]
+        for row_idx in np.arange(0, resolution[0], patch_size[0], dtype=int):
+            for col_idx in np.arange(0, resolution[1], patch_size[1], dtype=int):
+                # [row_idx:row_idx+patch_size[0], col_idx:col_idx+patch_size[1]]
+                patch_indices = tuple([slice(row_idx,row_idx+patch_size[0]), slice(col_idx,col_idx+patch_size[1])])
+                src_patch  = src_frame[patch_indices]
+                edvr_patch = edvr_frame[patch_indices]
+                score = score_func(src_patch, edvr_patch)
+                if score >threshold:
+                    final_frame[patch_indices] = edvr_patch
+                else:
+                    final_frame[patch_indices] = src_patch
+        cv2.imwrite(os.path.join(output_folder, frame_filename), final_frame)
+    return output_folder
 
 def edvr_video(video_src_path: Path, data_mode: str, chunk_size: int, finetune_stage2: bool,
                clean_frames: bool, resolution: tuple):
@@ -270,6 +296,7 @@ def edvr_video(video_src_path: Path, data_mode: str, chunk_size: int, finetune_s
     inframes_folder = extract_raw_frames(video_src_path, resolution)
 
     # process frames
+    outframes = outframes_s1_root / sub_folder_name
     outframes = edvrPredict(data_mode, 1, chunk_size, inframes_folder,
                             outframes_s1_root / sub_folder_name)
 
@@ -279,9 +306,17 @@ def edvr_video(video_src_path: Path, data_mode: str, chunk_size: int, finetune_s
         outframes = edvrPredict(data_mode, 2, chunk_size, outframes,
                                 outframes_s2_root / sub_folder_name)
 
-    # Encode video from predicted frames
-    output_video_path = result_folder / f'{video_src_path.stem}_{data_mode}.mp4'
-    encode_video(video_src_path, outframes, output_video_path)
+    # patch artifact
+    if PATCH_ARTIFACT_ENABLED:
+        for patch_parse in [16, 32]:
+            for threshold in [0.8, 0.9]:
+                outframes = patch_artifact(inframes_folder, outframes, fix_patch_root / sub_folder_name, patch_parse, threshold)
+                output_video_path = result_folder / f'{video_src_path.stem}_{data_mode}_{patch_parse}_{threshold}.mp4'
+                encode_video(video_src_path, outframes, output_video_path)
+    else:
+        # Encode video from predicted frames
+        output_video_path = result_folder / f'{video_src_path.stem}_{data_mode}.mp4'
+        encode_video(video_src_path, outframes, output_video_path)
 
     print(f'Video output: {output_video_path}')
 
@@ -359,6 +394,7 @@ def handle_offset(args):
         os.rename(offset_img_folder, offset_folder_moved)
     else:
         offset_folder_moved = offset_img_folder + f'_{video_name}_{args.model}'
+
     if os.path.exists(offset_folder_moved):
         fps = 25 * 5  # because PCD run 5 times per frame
         encode_offset_layers_within_1_video(
@@ -401,7 +437,7 @@ def parse_args():
     parser.add_argument('-s', '--two-stage', dest='two_stage_enabled', type=str2bool, default=True)
     parser.add_argument('-c', '--clean', dest='clean_frames', type=str2bool, default=True)
     parser.add_argument('-r', '--resolution', dest='resolution', type=str2tuple,
-                        default=(1280, 720))
+                        default=(None, None))
     args = parser.parse_args()
     if args.model == 'Vid4':
         assert not args.two_stage_enabled, f'Vid4 do not have stage 2 pretrained model'

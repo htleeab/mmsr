@@ -11,7 +11,7 @@ from . import deform_conv_cuda
 
 logger = logging.getLogger('base')
 
-VISUALIZE_OFFSET = True
+VISUALIZE_OFFSET = False # offset visualization will slow down the program
 if VISUALIZE_OFFSET:
     import os, glob
     import torchvision
