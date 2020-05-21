@@ -31,6 +31,11 @@ class REDSDataset(data.Dataset):
 
     def __init__(self, opt):
         super(REDSDataset, self).__init__()
+        # some default options
+        if opt.get('exclude_sequences', None):
+            opt['exclude_sequences'] = ['000', '011', '015', '020']
+        if opt.get('N_frames_in_seq', None):
+            opt['N_frames_in_seq'] = 100
         self.opt = opt
         # temporal augmentation
         self.interval_list = opt['interval_list']
@@ -40,7 +45,7 @@ class REDSDataset(data.Dataset):
 
         self.half_N_frames = opt['N_frames'] // 2
         self.GT_root, self.LQ_root = opt['dataroot_GT'], opt['dataroot_LQ']
-        self.data_type = self.opt['data_type']
+        self.data_type = opt['data_type']
         self.LR_input = False if opt['GT_size'] == opt['LQ_size'] else True  # low resolution inputs
         #### directly load image keys
         if self.data_type == 'lmdb':
@@ -49,14 +54,17 @@ class REDSDataset(data.Dataset):
         elif opt['cache_keys']:
             logger.info('Using cache keys: {}'.format(opt['cache_keys']))
             self.paths_GT = pickle.load(open(opt['cache_keys'], 'rb'))['keys']
+        elif self.data_type == 'img':
+            self.paths_GT, _ = util.get_image_paths(self.data_type, opt['dataroot_GT'])
         else:
             raise ValueError(
                 'Need to create cache keys (meta_info.pkl) by running [create_lmdb.py]')
 
         # remove the REDS4 for testing
         self.paths_GT = [
-            v for v in self.paths_GT if v.split('_')[0] not in ['000', '011', '015', '020']
+            v for v in self.paths_GT if v.split('_')[0] not in opt['exclude_sequences']
         ]
+
         assert self.paths_GT, 'Error: GT path is empty.'
 
         if self.data_type == 'lmdb':
@@ -108,18 +116,27 @@ class REDSDataset(data.Dataset):
 
         scale = self.opt['scale']
         GT_size = self.opt['GT_size']
-        key = self.paths_GT[index]
-        name_a, name_b = key.split('_')
+        if self.data_type in ['mc', 'lmdb']:
+            key = self.paths_GT[index]
+            name_a, name_b = key.split('_')
+        elif self.data_type == 'img':
+            key = self.paths_GT[index]
+            name_a = osp.basename(osp.dirname(key))
+            name_b = osp.splitext(osp.basename(key))[0]
+        else:
+            raise Exception(f'data_type {self.data_type} not supported')
         center_frame_idx = int(name_b)
 
         #### determine the neighbor frames
         interval = random.choice(self.interval_list)
+        frame_in_sequence = self.opt['N_frames_in_seq']
+        frame_in_sequence_minus1 = frame_in_sequence-1
         if self.opt['border_mode']:
             direction = 1  # 1: forward; 0: backward
             N_frames = self.opt['N_frames']
             if self.random_reverse and random.random() < 0.5:
                 direction = random.choice([0, 1])
-            if center_frame_idx + interval * (N_frames - 1) > 99:
+            if center_frame_idx + interval * (N_frames - 1) > frame_in_sequence_minus1:
                 direction = 0
             elif center_frame_idx - interval * (N_frames - 1) < 0:
                 direction = 1
@@ -134,8 +151,8 @@ class REDSDataset(data.Dataset):
         else:
             # ensure not exceeding the borders
             while (center_frame_idx + self.half_N_frames * interval >
-                   99) or (center_frame_idx - self.half_N_frames * interval < 0):
-                center_frame_idx = random.randint(0, 99)
+                   frame_in_sequence_minus1) or (center_frame_idx - self.half_N_frames * interval < 0):
+                center_frame_idx = random.randint(0, frame_in_sequence_minus1)
             # get the neighbor list
             neighbor_list = list(
                 range(center_frame_idx - self.half_N_frames * interval,
