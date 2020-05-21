@@ -85,6 +85,11 @@ def setup_logger(logger_name, root, phase, level=logging.INFO, screen=False, tof
         fh = logging.FileHandler(log_file, mode='w')
         fh.setFormatter(formatter)
         lg.addHandler(fh)
+        # create softlink of new log so that it is easier to watching latest log
+        new_log_softlink = os.path.join(root, f'{phase}_new.log')
+        if os.path.exists(new_log_softlink) and pathlib.Path(new_log_softlink).is_symlink():
+            os.remove(new_log_softlink)
+        os.symlink(log_file, new_log_softlink)
     if screen:
         sh = logging.StreamHandler()
         sh.setFormatter(formatter)
