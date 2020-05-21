@@ -32,11 +32,12 @@ class REDSDataset(data.Dataset):
     def __init__(self, opt):
         super(REDSDataset, self).__init__()
         # some default options
-        if opt.get('exclude_sequences', None):
+        if 'exclude_sequences' not in opt:
             opt['exclude_sequences'] = ['000', '011', '015', '020']
-        if opt.get('N_frames_in_seq', None):
+        if 'N_frames_in_seq' not in opt:
             opt['N_frames_in_seq'] = 100
         self.opt = opt
+
         # temporal augmentation
         self.interval_list = opt['interval_list']
         self.random_reverse = opt['random_reverse']
