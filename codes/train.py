@@ -234,6 +234,13 @@ def main():
                             # calculate PSNR
                             psnr_rlt[folder][idx_d] = util.calculate_psnr(rlt_img, gt_img)
 
+                            # save image
+                            folder_path = os.path.join(opt['path']['val_images'],
+                                                       f'{current_step:06d}', f'{folder}')
+                            os.makedirs(folder_path, exist_ok=True)
+                            save_path = os.path.join(folder_path, f'{idx_d:03d}.png')
+                            util.save_img(rlt_img, save_path)
+
                             if rank == 0:
                                 for _ in range(world_size):
                                     pbar.update('Test {} - {}/{}'.format(folder, idx_d, max_idx))
