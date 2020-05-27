@@ -427,15 +427,16 @@ class ModulatedDeformConvPack(ModulatedDeformConv):
             # the key is different in early versions
             # In version < 2, ModulatedDeformConvPack
             # loads previous benchmark models.
-            if (prefix + 'conv_offset.weight' not in state_dict
-                    and prefix[:-1] + '_offset.weight' in state_dict):
-                state_dict[prefix + 'conv_offset.weight'] = state_dict.pop(
-                    prefix[:-1] + '_offset.weight')
-            if (prefix + 'conv_offset.bias' not in state_dict
-                    and prefix[:-1] + '_offset.bias' in state_dict):
-                state_dict[prefix +
-                           'conv_offset.bias'] = state_dict.pop(prefix[:-1] +
-                                                                '_offset.bias')
+            if prefix + 'conv_offset.weight' not in state_dict:
+                if prefix[:-1] + '_offset.weight' in state_dict:
+                    state_dict[prefix + 'conv_offset.weight'] = state_dict.pop(prefix[:-1] + '_offset.weight')
+                elif prefix + 'conv_offset_mask.weight' in state_dict:
+                    state_dict[prefix + 'conv_offset.weight'] = state_dict.pop(prefix + 'conv_offset_mask.weight')
+            if prefix + 'conv_offset.bias' not in state_dict:
+                if prefix[:-1] + '_offset.bias' in state_dict:
+                    state_dict[prefix + 'conv_offset.bias'] = state_dict.pop(prefix[:-1] + '_offset.bias')
+                elif prefix + 'conv_offset_mask.bias' in state_dict:
+                    state_dict[prefix + 'conv_offset.bias'] = state_dict.pop(prefix + 'conv_offset_mask.bias')
 
         if version is not None and version > 1:
             print_log(
