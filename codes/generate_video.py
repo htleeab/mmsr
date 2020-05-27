@@ -34,9 +34,8 @@ outframes_s1_root = workfolder / "outframes_s1"
 outframes_s2_root = workfolder / "outframes_s2"
 fix_patch_root = workfolder / "fix_patch"
 result_folder = workfolder / "result"
-pretrained_models = Path('../experiments/pretrained_models')
 
-PATCH_ARTIFACT_ENABLED = False # If true, replace the patch with source when the ssim > threshold
+PATCH_ARTIFACT_ENABLED = False  # If true, replace the patch with source when the ssim > threshold
 
 img_format = 'png'
 device = torch.device('cuda')
@@ -45,6 +44,7 @@ img_vcodec = 'mjpeg' if img_format == 'jpg' else img_format
 offset_log_filepath = 'offset_mean.log'
 
 torch.backends.cudnn.benchmark = True
+
 
 def clean_mem():
     # torch.cuda.empty_cache()
@@ -64,14 +64,16 @@ def preProcess(images_path, multiple):
     '''Need to resize images for blurred model (needs to be multiples of 4 or 16)'''
     ## Check shape of 1 image
     h, w, _ = cv2.imread(images_path[0]).shape
-    assert cv2.imread(images_path[0]).shape == cv2.imread(images_path[-1]).shape, f'first frame and last frame have different shape, please clean previous frame and re-extract it'
+    assert cv2.imread(images_path[0]).shape == cv2.imread(
+        images_path[-1]
+    ).shape, f'first frame and last frame have different shape, please clean previous frame and re-extract it'
     if not (h % multiple == 0 and w % multiple == 0):
         h_padding = (multiple - h % multiple) % multiple
         w_padding = (multiple - w % multiple) % multiple
         print(f'resolution {h}x{w} is not multiple of {multiple}, pad {h_padding, w_padding}')
         for img_path in tqdm(images_path, desc='pre-Processing'):
             img = cv2.imread(img_path)
-            padded_img = np.pad(img, [(0, h_padding), (0, w_padding), (0,0)])
+            padded_img = np.pad(img, [(0, h_padding), (0, w_padding), (0, 0)])
             cv2.imwrite(img_path, padded_img)
 
 
@@ -97,14 +99,17 @@ def extract_raw_frames(source_path: Path, resolution: tuple):
         print(f'frame of {source_path} has been extracted already, skip')
     else:
         purge_images(inframes_folder)
-        resolution_opt = '-s' + ':'.join([str(x) for x in resolution]) if resolution[0] is not None else '' 
+        resolution_opt = '-s' + ':'.join([str(x)
+                                          for x in resolution]) if resolution[0] is not None else ''
         subprocess.call(
             f'ffmpeg -y -i {str(source_path)} {resolution_opt} -f image2'
             f' -pix_fmt rgb24 -c:v {img_vcodec} {inframe_path_template}', shell=True)
+        print(f'extracted frames: {len(os.listdir(inframes_folder))}')
     return inframes_folder
 
 
-def get_pretrained_model_path(data_mode, stage):
+def get_pretrained_model_path(data_mode, stage, pretrained_model_dir):
+    pretrained_models = Path(pretrained_model_dir)
     if data_mode == 'Vid4':
         if stage == 1:
             model_path = pretrained_models / 'EDVR_Vimeo90K_SR_L.pth'
@@ -131,11 +136,11 @@ def get_pretrained_model_path(data_mode, stage):
         else:
             model_path = pretrained_models / 'EDVR_REDS_deblurcomp_Stage2.pth'
     else:
-        raise NotImplementedError
+        raise NotImplementedError(f'{data_mode} is not implemented')
     return model_path
 
 
-def edvrPredict(data_mode, stage, chunk_size, test_dataset_folder, save_folder):
+def edvrPredict(data_mode, stage, chunk_size, test_dataset_folder, save_folder, model_dir):
     '''
     data_mode = Vid4 | sharp_bicubic | blur_bicubic | blur | blur_comp
                 Vid4: SR
@@ -149,7 +154,7 @@ def edvrPredict(data_mode, stage, chunk_size, test_dataset_folder, save_folder):
     HR_in = stage == 2 or data_mode in ['blur', 'blur_comp']
     back_RBs = 40 if stage == 1 else 20
     predeblur = 'blur' in data_mode  # True if blur_bicubic | blur | blur_comp
-    model_path = get_pretrained_model_path(data_mode, stage)
+    model_path = get_pretrained_model_path(data_mode, stage, model_dir)
 
     ## set up the models
     model = EDVR_arch.EDVR(128, N_in, 8, 5, back_RBs, predeblur=predeblur, HR_in=HR_in)
@@ -239,18 +244,18 @@ def encode_images(outframes_folder, output_filepath, fps):
 
 
 def edvr_img2video(img_src_dir: Path, data_mode: str, chunk_size: int, finetune_stage2: bool,
-                   clean_frames: bool):
+                   clean_frames: bool, model_dir_path: str):
     sub_folder_name = f'{img_src_dir.stem}_{data_mode}'
 
     # process frames
     outframes = edvrPredict(data_mode, 1, chunk_size, img_src_dir,
-                            outframes_s1_root / sub_folder_name)
+                            outframes_s1_root / sub_folder_name, model_dir_path)
 
     # fine-tune stage 2
     if finetune_stage2:
         print(f'fine-tune with stage 2 model')
         outframes = edvrPredict(data_mode, 2, chunk_size, outframes,
-                                outframes_s2_root / sub_folder_name)
+                                outframes_s2_root / sub_folder_name, model_dir_path)
 
     # Encode video from predicted frames
     output_video_path = result_folder / f'{img_src_dir.name}_{data_mode}.mp4'
@@ -263,7 +268,8 @@ def edvr_img2video(img_src_dir: Path, data_mode: str, chunk_size: int, finetune_
         shutil.rmtree(outframes_s1_root, ignore_errors=True, onerror=None)
         shutil.rmtree(outframes_s2_root, ignore_errors=True, onerror=None)
 
-def patch_artifact(inframe_folder, edvr_frame_folder, output_folder, patch_parse = 16, threshold=0.8):
+
+def patch_artifact(inframe_folder, edvr_frame_folder, output_folder, patch_parse=16, threshold=0.8):
     os.makedirs(output_folder, exist_ok=True)
     score_func = get_score_func('ssim')
     for frame_filename in tqdm(sorted(os.listdir(edvr_frame_folder)), desc='patch artifact'):
@@ -273,23 +279,27 @@ def patch_artifact(inframe_folder, edvr_frame_folder, output_folder, patch_parse
         assert src_frame is not None, f'cannot read {os.path.join(inframe_folder, frame_filename)}'
         resolution = edvr_frame.shape
         final_frame = np.zeros(edvr_frame.shape)
-        patch_size = [int(x/patch_parse) for x in resolution[:2]]
+        patch_size = [int(x / patch_parse) for x in resolution[:2]]
         for row_idx in np.arange(0, resolution[0], patch_size[0], dtype=int):
             for col_idx in np.arange(0, resolution[1], patch_size[1], dtype=int):
                 # [row_idx:row_idx+patch_size[0], col_idx:col_idx+patch_size[1]]
-                patch_indices = tuple([slice(row_idx,row_idx+patch_size[0]), slice(col_idx,col_idx+patch_size[1])])
-                src_patch  = src_frame[patch_indices]
+                patch_indices = tuple([
+                    slice(row_idx, row_idx + patch_size[0]),
+                    slice(col_idx, col_idx + patch_size[1])
+                ])
+                src_patch = src_frame[patch_indices]
                 edvr_patch = edvr_frame[patch_indices]
                 score = score_func(src_patch, edvr_patch)
-                if score >threshold:
+                if score > threshold:
                     final_frame[patch_indices] = edvr_patch
                 else:
                     final_frame[patch_indices] = src_patch
         cv2.imwrite(os.path.join(output_folder, frame_filename), final_frame)
     return output_folder
 
+
 def edvr_video(video_src_path: Path, data_mode: str, chunk_size: int, finetune_stage2: bool,
-               clean_frames: bool, resolution: tuple):
+               clean_frames: bool, resolution: tuple, model_dir_path: str):
     sub_folder_name = f'{video_src_path.stem}_{data_mode}'
 
     # extract frames
@@ -298,19 +308,20 @@ def edvr_video(video_src_path: Path, data_mode: str, chunk_size: int, finetune_s
     # process frames
     outframes = outframes_s1_root / sub_folder_name
     outframes = edvrPredict(data_mode, 1, chunk_size, inframes_folder,
-                            outframes_s1_root / sub_folder_name)
+                            outframes_s1_root / sub_folder_name, model_dir_path)
 
     # fine-tune stage 2
     if finetune_stage2:
         print(f'fine-tune with stage 2 model')
         outframes = edvrPredict(data_mode, 2, chunk_size, outframes,
-                                outframes_s2_root / sub_folder_name)
+                                outframes_s2_root / sub_folder_name, model_dir_path)
 
     # patch artifact
     if PATCH_ARTIFACT_ENABLED:
         for patch_parse in [16, 32]:
             for threshold in [0.8, 0.9]:
-                outframes = patch_artifact(inframes_folder, outframes, fix_patch_root / sub_folder_name, patch_parse, threshold)
+                outframes = patch_artifact(inframes_folder, outframes,
+                                           fix_patch_root / sub_folder_name, patch_parse, threshold)
                 output_video_path = result_folder / f'{video_src_path.stem}_{data_mode}_{patch_parse}_{threshold}.mp4'
                 encode_video(video_src_path, outframes, output_video_path)
     else:
@@ -434,6 +445,9 @@ def parse_args():
                         help='input video file or folder of image sequences')
     parser.add_argument('-m', '--model', dest='model', type=str, default='blur_comp',
                         choices=['Vid4', 'sharp_bicubic', 'blur_bicubic', 'blur', 'blur_comp'])
+    parser.add_argument('-w', '--model_dir', dest='model_dir', type=str,
+                        default='../experiments/pretrained_models',
+                        help='directory of pretrained model')
     parser.add_argument('-s', '--two-stage', dest='two_stage_enabled', type=str2bool, default=True)
     parser.add_argument('-c', '--clean', dest='clean_frames', type=str2bool, default=True)
     parser.add_argument('-r', '--resolution', dest='resolution', type=str2tuple,
@@ -449,10 +463,12 @@ if __name__ == '__main__':
         os.remove(offset_log_filepath)
     args = parse_args()
     if not os.path.isdir(args.input):
+        assert os.path.exists(args.input), f'{args.input} not exists'
         edvr_video(Path(args.input), args.model, 100, args.two_stage_enabled, args.clean_frames,
-                   args.resolution)
+                   args.resolution, args.model_dir)
     else:
-        edvr_img2vid(args.input, args.model, 100, args.two_stage_enabled, args.clean_frames)
+        edvr_img2vid(args.input, args.model, 100, args.two_stage_enabled, args.clean_frames,
+                     args.model_dir)
     if os.path.exists(offset_log_filepath):
         video_name = os.path.splitext(os.path.basename(args.input))[0]
         os.rename(offset_log_filepath, f'offset_log/offset_{video_name}_{args.model}.log')
