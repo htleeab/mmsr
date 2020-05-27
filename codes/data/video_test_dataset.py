@@ -57,8 +57,8 @@ class VideoTestDataset(data.Dataset):
                 'Not support video test dataset. Support Vid4, REDS4 and Vimeo90k-Test.')
 
     def __getitem__(self, index):
-        # path_LQ = self.data_info['path_LQ'][index]
-        # path_GT = self.data_info['path_GT'][index]
+        path_LQ = self.data_info['path_LQ'][index]
+        path_GT = self.data_info['path_GT'][index]
         folder = self.data_info['folder'][index]
         idx, max_idx = self.data_info['idx'][index].split('/')
         idx, max_idx = int(idx), int(max_idx)
@@ -77,7 +77,9 @@ class VideoTestDataset(data.Dataset):
             'GT': img_GT,
             'folder': folder,
             'idx': self.data_info['idx'][index],
-            'border': border
+            'border': border,
+            'LQ_path': path_LQ,
+            'GT_path': path_GT,
         }
 
     def __len__(self):
