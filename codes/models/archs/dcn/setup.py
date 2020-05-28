@@ -4,6 +4,7 @@ from setuptools import setup
 import torch
 from torch.utils.cpp_extension import (BuildExtension, CppExtension, CUDAExtension)
 
+
 def make_cuda_ext(name, module, sources, sources_cuda=[]):
 
     define_macros = []
@@ -23,20 +24,14 @@ def make_cuda_ext(name, module, sources, sources_cuda=[]):
         extension = CppExtension
         # raise EnvironmentError('CUDA is required to compile MMDetection!')
 
-    return extension(
-        name=f'{module}.{name}' if module !='' else name,
-        sources=[os.path.join(*module.split('.'), p) for p in sources],
-        define_macros=define_macros,
-        extra_compile_args=extra_compile_args)
+    return extension(name=f'{module}.{name}' if module != '' else name,
+                     sources=[os.path.join(*module.split('.'), p) for p in sources],
+                     define_macros=define_macros, extra_compile_args=extra_compile_args)
+
 
 setup(
     name='deform_conv', ext_modules=[
         make_cuda_ext(
-            name='deform_conv_ext',
-            module='',
-            sources=['src/deform_conv_ext.cpp'],
-            sources_cuda=[
-                'src/cuda/deform_conv_cuda.cpp',
-                'src/cuda/deform_conv_cuda_kernel.cu'
-            ])
+            name='deform_conv_ext', module='', sources=['src/deform_conv_ext.cpp'],
+            sources_cuda=['src/cuda/deform_conv_cuda.cpp', 'src/cuda/deform_conv_cuda_kernel.cu'])
     ], cmdclass={'build_ext': BuildExtension}, zip_safe=False)
