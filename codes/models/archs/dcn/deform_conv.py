@@ -9,7 +9,7 @@ from torch.autograd import Function
 from torch.autograd.function import once_differentiable
 from torch.nn.modules.utils import _pair, _single
 
-from . import deform_conv_ext
+import deform_conv_ext
 
 
 class DeformConvFunction(Function):
@@ -392,9 +392,10 @@ class ModulatedDeformConvPack(ModulatedDeformConv):
 
     _version = 2
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, extra_offset_mask=False, layer_name='', **kwargs):
         super(ModulatedDeformConvPack, self).__init__(*args, **kwargs)
 
+        self.extra_offset_mask = extra_offset_mask
         self.conv_offset = nn.Conv2d(
             self.in_channels,
             self.deformable_groups * 3 * self.kernel_size[0] *
