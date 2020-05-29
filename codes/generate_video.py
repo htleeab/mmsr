@@ -15,6 +15,7 @@ import gc
 from pathlib import Path
 import argparse
 import subprocess  # for run ffmpeg cmd
+import time
 
 from tqdm import tqdm
 import numpy as np
@@ -26,7 +27,6 @@ import ffmpeg
 import utils.util as util
 import data.util as data_util
 import models.archs.EDVR_arch as EDVR_arch
-from scripts.diff_score import get_score_func
 
 workfolder = Path('../video')
 inframes_root = workfolder / "inframes"
@@ -36,20 +36,21 @@ fix_patch_root = workfolder / "fix_patch"
 result_folder = workfolder / "result"
 
 PATCH_ARTIFACT_ENABLED = False  # If true, replace the patch with source when the ssim > threshold
+if PATCH_ARTIFACT_ENABLED:
+    from functools import partial
+    import skimage
 
 img_format = 'png'
 device = torch.device('cuda')
 img_vcodec = 'mjpeg' if img_format == 'jpg' else img_format
-
 offset_log_filepath = 'offset_mean.log'
+forward_speed_moving_w = 0.3
 
 torch.backends.cudnn.benchmark = True
 
-
 def clean_mem():
-    # torch.cuda.empty_cache()
     gc.collect()
-
+    torch.cuda.empty_cache()
 
 def get_fps(source_path: Path) -> str:
     probe = ffmpeg.probe(str(source_path))
@@ -140,7 +141,7 @@ def get_pretrained_model_path(data_mode, stage, pretrained_model_dir):
     return model_path
 
 
-def edvrPredict(data_mode, stage, chunk_size, test_dataset_folder, save_folder, model_dir):
+def edvrPredict(data_mode, stage, chunk_size, test_dataset_folder, save_folder, model_dir, fp16):
     '''
     data_mode = Vid4 | sharp_bicubic | blur_bicubic | blur | blur_comp
                 Vid4: SR
@@ -159,6 +160,8 @@ def edvrPredict(data_mode, stage, chunk_size, test_dataset_folder, save_folder, 
     ## set up the models
     model = EDVR_arch.EDVR(128, N_in, 8, 5, back_RBs, predeblur=predeblur, HR_in=HR_in)
     model.load_state_dict(torch.load(model_path), strict=True)
+    if fp16:
+        model.half()
     model.eval()
     model = model.to(device)
 
@@ -172,6 +175,7 @@ def edvrPredict(data_mode, stage, chunk_size, test_dataset_folder, save_folder, 
     preProcess(img_path_l, preProcess_multiple_factor)
     padding = 'new_info' if data_mode in ('Vid4', 'sharp_bicubic') else 'replicate'
 
+    forward_speed = None
     ## Feed image sequence into model, predict output
     with tqdm(total=len(img_path_l)) as pbar:
         frame_num = 0
@@ -183,17 +187,21 @@ def edvrPredict(data_mode, stage, chunk_size, test_dataset_folder, save_folder, 
         # fixme: the frames near parse point is not continues, might need to overlap those frame and adjust select idx for completely continuous inference
         for images_chunk in parsed_img_list:
             clean_mem()
-            imgs_LQ = data_util.read_img_seq(images_chunk)
+            imgs_LQ = data_util.read_img_seq(images_chunk, fp16=fp16)
             max_idx = len(images_chunk)
-
             # process each image
             for img_idx, img_path in enumerate(images_chunk):
                 img_name = osp.splitext(osp.basename(img_path))[0]
                 select_idx = data_util.index_generation(img_idx, max_idx, N_in, padding=padding)
                 # Take reference image with n neighbor frames
-                imgs_in = imgs_LQ.index_select(0,
-                                               torch.LongTensor(select_idx)).unsqueeze(0).to(device)
+                imgs_in = imgs_LQ.index_select(0, torch.LongTensor(select_idx)).unsqueeze(0).to(device)
+                if img_idx <100:
+                    torch.cuda.empty_cache() # do not know why pyTorch reserved ~10 GB memroy...
+                forward_start_time = time.time()
                 output = util.single_forward(model, imgs_in)
+                forward_time = time.time() - forward_start_time
+                forward_speed = forward_time if forward_speed is None else forward_speed*(1-forward_speed_moving_w) + forward_time * forward_speed_moving_w
+                print(f'\rmoving avg of forward time: {forward_speed}, forward_time of this frame : {forward_time}')
                 output = util.tensor2img(output.squeeze(0))
 
                 cv2.imwrite(osp.join(save_folder, '{}.{}'.format(img_name, img_format)), output)
@@ -269,6 +277,19 @@ def edvr_img2video(img_src_dir: Path, data_mode: str, chunk_size: int, finetune_
         shutil.rmtree(outframes_s2_root, ignore_errors=True, onerror=None)
 
 
+def get_score_func(score_func_name):
+    score_func_name = score_func_name.lower()
+    if score_func_name == 'psnr':
+        score_func = skimage.measure.compare_psnr
+    elif score_func_name == 'ssim':
+        score_func = partial(skimage.measure.compare_ssim, multichannel=True)
+    elif score_func_name == 'mse':
+        score_func = lambda x, y: np.mean(np.square((x - y) / 255))
+    else:
+        raise NotImplementedError(f'score function {score_func_name} is not implemented')
+    return score_func
+
+
 def patch_artifact(inframe_folder, edvr_frame_folder, output_folder, patch_parse=16, threshold=0.8):
     os.makedirs(output_folder, exist_ok=True)
     score_func = get_score_func('ssim')
@@ -299,7 +320,7 @@ def patch_artifact(inframe_folder, edvr_frame_folder, output_folder, patch_parse
 
 
 def edvr_video(video_src_path: Path, data_mode: str, chunk_size: int, finetune_stage2: bool,
-               clean_frames: bool, resolution: tuple, model_dir_path: str):
+               clean_frames: bool, resolution: tuple, model_dir_path: str, fp16: bool):
     sub_folder_name = f'{video_src_path.stem}_{data_mode}'
 
     # extract frames
@@ -308,13 +329,13 @@ def edvr_video(video_src_path: Path, data_mode: str, chunk_size: int, finetune_s
     # process frames
     outframes = outframes_s1_root / sub_folder_name
     outframes = edvrPredict(data_mode, 1, chunk_size, inframes_folder,
-                            outframes_s1_root / sub_folder_name, model_dir_path)
+                            outframes_s1_root / sub_folder_name, model_dir_path, fp16)
 
     # fine-tune stage 2
     if finetune_stage2:
         print(f'fine-tune with stage 2 model')
         outframes = edvrPredict(data_mode, 2, chunk_size, outframes,
-                                outframes_s2_root / sub_folder_name, model_dir_path)
+                                outframes_s2_root / sub_folder_name, model_dir_path, fp16)
 
     # patch artifact
     if PATCH_ARTIFACT_ENABLED:
@@ -452,6 +473,8 @@ def parse_args():
     parser.add_argument('-c', '--clean', dest='clean_frames', type=str2bool, default=True)
     parser.add_argument('-r', '--resolution', dest='resolution', type=str2tuple,
                         default=(None, None))
+    parser.add_argument('--fp16', dest='fp16', action='store_true',
+                        help="Whether to use 16-bit float precision instead of 32-bit")
     args = parser.parse_args()
     if args.model == 'Vid4':
         assert not args.two_stage_enabled, f'Vid4 do not have stage 2 pretrained model'
@@ -465,7 +488,7 @@ if __name__ == '__main__':
     if not os.path.isdir(args.input):
         assert os.path.exists(args.input), f'{args.input} not exists'
         edvr_video(Path(args.input), args.model, 100, args.two_stage_enabled, args.clean_frames,
-                   args.resolution, args.model_dir)
+                   args.resolution, args.model_dir, args.fp16)
     else:
         edvr_img2vid(args.input, args.model, 100, args.two_stage_enabled, args.clean_frames,
                      args.model_dir)

@@ -91,7 +91,7 @@ def read_img(env, path, size=None):
     return img
 
 
-def read_img_seq(path):
+def read_img_seq(path, fp16=False):
     """Read a sequence of images from a given folder path
     Args:
         path (list/str): list of image paths/image folder path
@@ -107,7 +107,11 @@ def read_img_seq(path):
     # stack to Torch tensor
     imgs = np.stack(img_l, axis=0)
     imgs = imgs[:, :, :, [2, 1, 0]]
-    imgs = torch.from_numpy(np.ascontiguousarray(np.transpose(imgs, (0, 3, 1, 2)))).float()
+    imgs = torch.from_numpy(np.ascontiguousarray(np.transpose(imgs, (0, 3, 1, 2))))
+    if not fp16:
+        imgs = imgs.float()
+    else:
+        imgs = imgs.half()
     return imgs
 
 

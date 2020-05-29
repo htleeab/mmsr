@@ -5,3 +5,5 @@ pyyaml
 tb-nightly
 future
 mmcv
+tqdm
+ffmpeg-python
