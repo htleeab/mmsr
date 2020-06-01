@@ -130,7 +130,12 @@ def get_pretrained_model_path(data_mode, stage, pretrained_model_dir):
             model_path = pretrained_models / 'EDVR_REDS_deblur_L.pth'
         else:
             model_path = pretrained_models / 'EDVR_REDS_deblur_Stage2.pth'
-    elif data_mode == 'blur_comp':
+    elif data_mode == 'blur_comp_M':
+        if stage == 1:
+            model_path = pretrained_models / 'EDVR_REDS_deblurcomp_M.pth'
+        else:
+            raise NotImplementedError(f'{data_mode} stage {stage} is not implemented')
+    elif data_mode in ['blur_comp', 'blur_comp_L']:
         if stage == 1:
             model_path = pretrained_models / 'EDVR_REDS_deblurcomp_L.pth'
         else:
@@ -441,7 +446,7 @@ def str2tuple(v):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-i', '--input', dest='input', default='../video/input.mp4',
+    parser.add_argument('-i', '--input', dest='input', nargs='+', default=['../video/input.mp4'],
                         help='input video file or folder of image sequences')
     parser.add_argument('-m', '--model', dest='model', type=str, default='blur_comp',
                         choices=['Vid4', 'sharp_bicubic', 'blur_bicubic', 'blur', 'blur_comp'])
@@ -462,14 +467,15 @@ if __name__ == '__main__':
     if os.path.exists(offset_log_filepath):
         os.remove(offset_log_filepath)
     args = parse_args()
-    if not os.path.isdir(args.input):
-        assert os.path.exists(args.input), f'{args.input} not exists'
-        edvr_video(Path(args.input), args.model, 100, args.two_stage_enabled, args.clean_frames,
-                   args.resolution, args.model_dir)
-    else:
-        edvr_img2vid(args.input, args.model, 100, args.two_stage_enabled, args.clean_frames,
-                     args.model_dir)
-    if os.path.exists(offset_log_filepath):
-        video_name = os.path.splitext(os.path.basename(args.input))[0]
-        os.rename(offset_log_filepath, f'offset_log/offset_{video_name}_{args.model}.log')
-    handle_offset(args)
+    for input_file in args.input:
+        assert os.path.exists(input_file), f'{input_file} not exists'
+        if not os.path.isdir(input_file):
+            edvr_video(Path(input_file), args.model, 100, args.two_stage_enabled, args.clean_frames,
+                       args.resolution, args.model_dir)
+        else:
+            edvr_img2vid(input_file, args.model, 100, args.two_stage_enabled, args.clean_frames,
+                         args.model_dir)
+        if os.path.exists(offset_log_filepath):
+            video_name = os.path.splitext(os.path.basename(input_file))[0]
+            os.rename(offset_log_filepath, f'offset_log/offset_{video_name}_{args.model}.log')
+        handle_offset(args)
