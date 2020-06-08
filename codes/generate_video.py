@@ -26,19 +26,16 @@ import ffmpeg
 import utils.util as util
 import data.util as data_util
 import models.archs.EDVR_arch as EDVR_arch
-from scripts.diff_score import get_score_func
 
 workfolder = Path('../video')
 inframes_root = workfolder / "inframes"
 outframes_s1_root = workfolder / "outframes_s1"
 outframes_s2_root = workfolder / "outframes_s2"
-fix_patch_root = workfolder / "fix_patch"
 result_folder = workfolder / "result"
+side_by_side_root = workfolder / "side_by_side"
 
-PATCH_ARTIFACT_ENABLED = False  # If true, replace the patch with source when the ssim > threshold
-
-img_format = 'png'
 device = torch.device('cuda')
+img_format = 'png'
 img_vcodec = 'mjpeg' if img_format == 'jpg' else img_format
 
 offset_log_filepath = 'offset_mean.log'
@@ -99,13 +96,29 @@ def extract_raw_frames(source_path: Path, resolution: tuple):
         print(f'frame of {source_path} has been extracted already, skip')
     else:
         purge_images(inframes_folder)
-        resolution_opt = '-s' + ':'.join([str(x)
-                                          for x in resolution]) if resolution[0] is not None else ''
-        subprocess.call(
-            f'ffmpeg -y -i {str(source_path)} {resolution_opt} -f image2'
-            f' -pix_fmt rgb24 -c:v {img_vcodec} {inframe_path_template}', shell=True)
+        resolution_opt = f'-s {resolution[0]}:{resolution[1]}' if resolution[0] is not None else ''
+        subprocess.check_call(
+            f'ffmpeg -y -i "{str(source_path)}" {resolution_opt} -f image2'
+            f' -pix_fmt rgb24 -c:v {img_vcodec} "{inframe_path_template}"', shell=True)
         print(f'extracted frames: {len(os.listdir(inframes_folder))}')
     return inframes_folder
+
+
+def process_side_by_side_img_sequence(folder1, folder2, side_by_side_folder):
+    side_by_side_folder.mkdir(parents=True, exist_ok=True)
+    for img_name in sorted(os.listdir(folder1)):
+        img1_path = os.path.join(folder1, img_name)
+        img2_path = os.path.join(folder2, img_name)
+        out_path = os.path.join(side_by_side_folder, img_name)
+        assert os.path.exists(img1_path), f'{img1_path} not exists'
+        assert os.path.exists(img2_path), f'{img2_path} not exists'
+        img1 = cv2.imread(img1_path)
+        img2 = cv2.imread(img2_path)
+        assert img1 is not None, f'cannot read {img1_path}'
+        assert img2 is not None, f'cannot read {img2_path}'
+        packed_img = np.concatenate([img1, img2], axis=1)
+        cv2.imwrite(out_path, packed_img)
+    return side_by_side_folder
 
 
 def get_pretrained_model_path(data_mode, stage, pretrained_model_dir):
@@ -210,7 +223,7 @@ def edvrPredict(data_mode, stage, chunk_size, test_dataset_folder, save_folder, 
 
 def contain_audio(video_filepath):
     result = subprocess.run(
-        f'ffmpeg -i {video_filepath} -vn -f null - 2>&1 | grep does\ not\ contain\ any\ stream',
+        f'ffmpeg -i "{video_filepath}" -vn -f null - 2>&1 | grep does\ not\ contain\ any\ stream',
         shell=True, stdout=subprocess.PIPE)
     return len(result.stdout) == 0
 
@@ -226,12 +239,12 @@ def encode_video(source_path: Path, outframes_folder: Path, result_path: Path) -
 
     # encode output
     if contain_audio(source_path):
-        subprocess.call(
+        subprocess.check_call(
             f'ffmpeg -y -f image2 -r {fps} -c:v {img_vcodec} -i "{outframes_path_template}"'
             f' -vn -i "{str(source_path)}" '
             f' -c:v libx264 -crf 10 "{str(result_path)}"', shell=True)
     else:
-        subprocess.call(
+        subprocess.check_call(
             f'ffmpeg -y -f image2 -r {fps} -c:v {img_vcodec} -i "{outframes_path_template}"'
             f' -c:v libx264 -crf 10 "{str(result_path)}"', shell=True)
 
@@ -242,7 +255,7 @@ def encode_images(outframes_folder, output_filepath, fps):
     outframes_path_template = str(outframes_folder / ('%5d.' + img_format))
     result_folder = Path(os.path.dirname(output_filepath))
     result_folder.mkdir(parents=True, exist_ok=True)
-    subprocess.call(
+    subprocess.check_call(
         f'ffmpeg -y -f image2 -r {fps} -c:v {img_vcodec} -i "{outframes_path_template}"'
         f' -c:v libx264 "{str(output_filepath)}"', shell=True)
     return output_filepath
@@ -274,35 +287,6 @@ def edvr_img2video(img_src_dir: Path, data_mode: str, chunk_size: int, finetune_
         shutil.rmtree(outframes_s2_root, ignore_errors=True, onerror=None)
 
 
-def patch_artifact(inframe_folder, edvr_frame_folder, output_folder, patch_parse=16, threshold=0.8):
-    os.makedirs(output_folder, exist_ok=True)
-    score_func = get_score_func('ssim')
-    for frame_filename in tqdm(sorted(os.listdir(edvr_frame_folder)), desc='patch artifact'):
-        edvr_frame = cv2.imread(os.path.join(edvr_frame_folder, frame_filename))
-        src_frame = cv2.imread(os.path.join(inframe_folder, frame_filename))
-        assert edvr_frame is not None, f'cannot read {os.path.join(edvr_frame_folder, frame_filename)}'
-        assert src_frame is not None, f'cannot read {os.path.join(inframe_folder, frame_filename)}'
-        resolution = edvr_frame.shape
-        final_frame = np.zeros(edvr_frame.shape)
-        patch_size = [int(x / patch_parse) for x in resolution[:2]]
-        for row_idx in np.arange(0, resolution[0], patch_size[0], dtype=int):
-            for col_idx in np.arange(0, resolution[1], patch_size[1], dtype=int):
-                # [row_idx:row_idx+patch_size[0], col_idx:col_idx+patch_size[1]]
-                patch_indices = tuple([
-                    slice(row_idx, row_idx + patch_size[0]),
-                    slice(col_idx, col_idx + patch_size[1])
-                ])
-                src_patch = src_frame[patch_indices]
-                edvr_patch = edvr_frame[patch_indices]
-                score = score_func(src_patch, edvr_patch)
-                if score > threshold:
-                    final_frame[patch_indices] = edvr_patch
-                else:
-                    final_frame[patch_indices] = src_patch
-        cv2.imwrite(os.path.join(output_folder, frame_filename), final_frame)
-    return output_folder
-
-
 def edvr_video(video_src_path: Path, data_mode: str, chunk_size: int, finetune_stage2: bool,
                clean_frames: bool, resolution: tuple, model_dir_path: str):
     sub_folder_name = f'{video_src_path.stem}_{data_mode}'
@@ -321,25 +305,21 @@ def edvr_video(video_src_path: Path, data_mode: str, chunk_size: int, finetune_s
         outframes = edvrPredict(data_mode, 2, chunk_size, outframes,
                                 outframes_s2_root / sub_folder_name, model_dir_path)
 
-    # patch artifact
-    if PATCH_ARTIFACT_ENABLED:
-        for patch_parse in [16, 32]:
-            for threshold in [0.8, 0.9]:
-                outframes = patch_artifact(inframes_folder, outframes,
-                                           fix_patch_root / sub_folder_name, patch_parse, threshold)
-                output_video_path = result_folder / f'{video_src_path.stem}_{data_mode}_{patch_parse}_{threshold}.mp4'
-                encode_video(video_src_path, outframes, output_video_path)
-    else:
-        # Encode video from predicted frames
-        output_video_path = result_folder / f'{video_src_path.stem}_{data_mode}.mp4'
-        encode_video(video_src_path, outframes, output_video_path)
+    # Encode video from predicted frames
+    output_video_path = result_folder / f'{video_src_path.stem}_{data_mode}.mp4'
+    encode_video(video_src_path, outframes, output_video_path)
 
+    # Generate side-by-side version
+    side_by_side_folder = process_side_by_side_img_sequence(inframes_folder, outframes, side_by_side_root / sub_folder_name)
+    output_video_path = result_folder / f'{video_src_path.stem}_{data_mode}_side_by_side.mp4'
+    encode_video(video_src_path, side_by_side_folder, output_video_path)
     print(f'Video output: {output_video_path}')
 
     if clean_frames:
         shutil.rmtree(inframes_root, ignore_errors=True, onerror=None)
         shutil.rmtree(outframes_s1_root, ignore_errors=True, onerror=None)
         shutil.rmtree(outframes_s2_root, ignore_errors=True, onerror=None)
+        shutil.rmtree(side_by_side_root, ignore_errors=True, onerror=None)
 
 
 def pack_img(sub_imgs, row=2):
@@ -400,8 +380,8 @@ def encoder_offset_layers_per_group(offset_folder, video_out_filepath, fps, defo
     video_out.release()
 
 
-def handle_offset(args):
-    video_name = os.path.splitext(os.path.basename(args.input))[0]
+def handle_offset(input_file, args):
+    video_name = os.path.splitext(os.path.basename(input_file))[0]
     offset_img_folder = '../video/offset'
     if os.path.exists(offset_img_folder):
         offset_folder_moved = offset_img_folder + f'_{video_name}_{args.model}'
@@ -478,4 +458,4 @@ if __name__ == '__main__':
         if os.path.exists(offset_log_filepath):
             video_name = os.path.splitext(os.path.basename(input_file))[0]
             os.rename(offset_log_filepath, f'offset_log/offset_{video_name}_{args.model}.log')
-        handle_offset(args)
+        handle_offset(input_file, args)
