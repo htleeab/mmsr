@@ -26,17 +26,13 @@ import ffmpeg
 import utils.util as util
 import data.util as data_util
 import models.archs.EDVR_arch as EDVR_arch
-from scripts.diff_score import get_score_func
 
 workfolder = Path('../video')
 inframes_root = workfolder / "inframes"
 outframes_s1_root = workfolder / "outframes_s1"
 outframes_s2_root = workfolder / "outframes_s2"
-fix_patch_root = workfolder / "fix_patch"
 result_folder = workfolder / "result"
 side_by_side_root = workfolder / "side_by_side"
-
-PATCH_ARTIFACT_ENABLED = False  # If true, replace the patch with source when the ssim > threshold
 
 device = torch.device('cuda')
 img_format = 'png'
@@ -291,35 +287,6 @@ def edvr_img2video(img_src_dir: Path, data_mode: str, chunk_size: int, finetune_
         shutil.rmtree(outframes_s2_root, ignore_errors=True, onerror=None)
 
 
-def patch_artifact(inframe_folder, edvr_frame_folder, output_folder, patch_parse=16, threshold=0.8):
-    os.makedirs(output_folder, exist_ok=True)
-    score_func = get_score_func('ssim')
-    for frame_filename in tqdm(sorted(os.listdir(edvr_frame_folder)), desc='patch artifact'):
-        edvr_frame = cv2.imread(os.path.join(edvr_frame_folder, frame_filename))
-        src_frame = cv2.imread(os.path.join(inframe_folder, frame_filename))
-        assert edvr_frame is not None, f'cannot read {os.path.join(edvr_frame_folder, frame_filename)}'
-        assert src_frame is not None, f'cannot read {os.path.join(inframe_folder, frame_filename)}'
-        resolution = edvr_frame.shape
-        final_frame = np.zeros(edvr_frame.shape)
-        patch_size = [int(x / patch_parse) for x in resolution[:2]]
-        for row_idx in np.arange(0, resolution[0], patch_size[0], dtype=int):
-            for col_idx in np.arange(0, resolution[1], patch_size[1], dtype=int):
-                # [row_idx:row_idx+patch_size[0], col_idx:col_idx+patch_size[1]]
-                patch_indices = tuple([
-                    slice(row_idx, row_idx + patch_size[0]),
-                    slice(col_idx, col_idx + patch_size[1])
-                ])
-                src_patch = src_frame[patch_indices]
-                edvr_patch = edvr_frame[patch_indices]
-                score = score_func(src_patch, edvr_patch)
-                if score > threshold:
-                    final_frame[patch_indices] = edvr_patch
-                else:
-                    final_frame[patch_indices] = src_patch
-        cv2.imwrite(os.path.join(output_folder, frame_filename), final_frame)
-    return output_folder
-
-
 def edvr_video(video_src_path: Path, data_mode: str, chunk_size: int, finetune_stage2: bool,
                clean_frames: bool, resolution: tuple, model_dir_path: str):
     sub_folder_name = f'{video_src_path.stem}_{data_mode}'
@@ -338,23 +305,14 @@ def edvr_video(video_src_path: Path, data_mode: str, chunk_size: int, finetune_s
         outframes = edvrPredict(data_mode, 2, chunk_size, outframes,
                                 outframes_s2_root / sub_folder_name, model_dir_path)
 
-    # patch artifact
-    if PATCH_ARTIFACT_ENABLED:
-        for patch_parse in [16, 32]:
-            for threshold in [0.8, 0.9]:
-                outframes = patch_artifact(inframes_folder, outframes,
-                                           fix_patch_root / sub_folder_name, patch_parse, threshold)
-                output_video_path = result_folder / f'{video_src_path.stem}_{data_mode}_{patch_parse}_{threshold}.mp4'
-                encode_video(video_src_path, outframes, output_video_path)
-    else:
-        # Encode video from predicted frames
-        output_video_path = result_folder / f'{video_src_path.stem}_{data_mode}.mp4'
-        encode_video(video_src_path, outframes, output_video_path)
+    # Encode video from predicted frames
+    output_video_path = result_folder / f'{video_src_path.stem}_{data_mode}.mp4'
+    encode_video(video_src_path, outframes, output_video_path)
 
-        # Generate side-by-side version
-        side_by_side_folder = process_side_by_side_img_sequence(inframes_folder, outframes, side_by_side_root / sub_folder_name)
-        output_video_path = result_folder / f'{video_src_path.stem}_{data_mode}_side_by_side.mp4'
-        encode_video(video_src_path, side_by_side_folder, output_video_path)
+    # Generate side-by-side version
+    side_by_side_folder = process_side_by_side_img_sequence(inframes_folder, outframes, side_by_side_root / sub_folder_name)
+    output_video_path = result_folder / f'{video_src_path.stem}_{data_mode}_side_by_side.mp4'
+    encode_video(video_src_path, side_by_side_folder, output_video_path)
     print(f'Video output: {output_video_path}')
 
     if clean_frames:
