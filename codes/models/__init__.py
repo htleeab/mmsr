@@ -12,6 +12,8 @@ def create_model(opt):
     # video restoration
     elif model == 'video_base':
         from .Video_base_model import VideoBaseModel as M
+    elif model == 'video_base_gan':
+        from .Video_base_GAN_model import VideoBaseGANModel as M
     else:
         raise NotImplementedError('Model [{:s}] not recognized.'.format(model))
     m = M(opt)
