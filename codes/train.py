@@ -94,11 +94,11 @@ def main():
         logger.info('Random seed: {}'.format(seed))
     util.set_random_seed(seed)
 
-    torch.backends.cudnn.benchmark = True
+    #     torch.backends.cudnn.benchmark = True
     # torch.backends.cudnn.deterministic = True
 
     #### create train and val dataloader
-    dataset_ratio = 200  # enlarge the size of each epoch
+    dataset_ratio = 20  # dataset_ratio = 200  # enlarge the size of each epoch
     for phase, dataset_opt in opt['datasets'].items():
         if phase == 'train':
             train_set = create_dataset(dataset_opt)
@@ -172,8 +172,10 @@ def main():
                             tb_logger.add_scalar(k, v, current_step)
                 if rank <= 0:
                     logger.info(message)
+
             #### validation
-            if opt['datasets'].get('val', None) and current_step % opt['train']['val_freq'] == 0:
+            if opt['datasets'].get('val', None) and (current_step % opt['train']['val_freq'] == 0
+                                                     or current_step in [100, 500, 1000]):
                 if opt['model'] in ['sr', 'srgan'] and rank <= 0:  # image restoration validation
                     # does not support multi-GPU validation
                     pbar = util.ProgressBar(len(val_loader))
@@ -210,6 +212,11 @@ def main():
                     if opt['use_tb_logger'] and 'debug' not in opt['name']:
                         tb_logger.add_scalar('psnr', avg_psnr, current_step)
                 else:  # video restoration validation
+                    # Save validation image
+                    img_dir = os.path.join(opt['path']['val_images'], f'{current_step}')
+                    if rank == 0:  # avoid race condition
+                        logger.info(f'save validation to {img_dir}')
+                        util.mkdir(img_dir)
                     if opt['dist']:
                         # multi-GPU testing
                         psnr_rlt = {}  # with border and center frames
@@ -231,6 +238,11 @@ def main():
                             visuals = model.get_current_visuals()
                             rlt_img = util.tensor2img(visuals['rlt'])  # uint8
                             gt_img = util.tensor2img(visuals['GT'])  # uint8
+
+                            # Save validation image
+                            save_img_path = os.path.join(img_dir, f'{folder}_{idx_d:02d}.png')
+                            util.save_img(rlt_img, save_img_path)
+                            # if rank > 0 and dir not created, cv2 skips saving
                             # calculate PSNR
                             psnr_rlt[folder][idx_d] = util.calculate_psnr(rlt_img, gt_img)
 
@@ -249,7 +261,7 @@ def main():
                                 psnr_rlt_avg[k] = torch.mean(v).cpu().item()
                                 psnr_total_avg += psnr_rlt_avg[k]
                             psnr_total_avg /= len(psnr_rlt)
-                            log_s = '# Validation # PSNR: {:.4e}:'.format(psnr_total_avg)
+                            log_s = f'# Validation {current_step} # PSNR: {psnr_total_avg:.4f}:'
                             for k, v in psnr_rlt_avg.items():
                                 log_s += ' {}: {:.4e}'.format(k, v)
                             logger.info(log_s)
