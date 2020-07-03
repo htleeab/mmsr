@@ -1,4 +1,4 @@
-import logging
+import logging, os
 from collections import OrderedDict
 
 import torch
@@ -21,7 +21,6 @@ class VideoBaseModel(BaseModel):
         else:
             self.rank = -1  # non dist training
         train_opt = opt['train']
-
         # define network and load pretrained models
         self.netG = networks.define_G(opt).to(self.device)
         if opt['dist']:
@@ -159,6 +158,7 @@ class VideoBaseModel(BaseModel):
     def load(self):
         load_path_G = self.opt['path']['pretrain_model_G']
         if load_path_G is not None:
+            assert os.path.exists(load_path_G), f'{load_path_G} not exist'
             logger.info('Loading model for G [{:s}] ...'.format(load_path_G))
             self.load_network(load_path_G, self.netG, self.opt['path']['strict_load'])
 
