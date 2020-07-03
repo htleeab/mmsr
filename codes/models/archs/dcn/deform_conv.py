@@ -1,4 +1,5 @@
 import math
+import logging
 
 import torch
 import torch.nn as nn
@@ -17,6 +18,8 @@ if VISUALIZE_OFFSET:
     import torchvision
     OFFSET_IMG_DIR = '../video/offset'
     VISUALIZE_OFFSET_PER_GROUP = True
+
+logger = logging.getLogger('base')
 
 
 class DeformConvFunction(Function):
@@ -276,8 +279,7 @@ class DeformConvPack(DeformConv):
                                                                          '_offset.bias')
 
         if version is not None and version > 1:
-            print_log(f'DeformConvPack {prefix.rstrip(".")} is upgraded to '
-                      'version 2.', logger='root')
+            logger.info(f'DeformConvPack {prefix.rstrip(".")} is upgraded to version 2.')
 
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys,
                                       unexpected_keys, error_msgs)
