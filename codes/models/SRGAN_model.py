@@ -139,8 +139,8 @@ class SRGANModel(BaseModel):
         self.optimizer_G.zero_grad()
         self.fake_H = self.netG(self.var_L)
 
-        l_g_total = 0
         if step % self.D_update_ratio == 0 and step > self.D_init_iters:
+            l_g_total = 0
             if self.cri_pix:  # pixel loss
                 l_g_pix = self.l_pix_w * self.cri_pix(self.fake_H, self.var_H)
                 l_g_total += l_g_pix
@@ -193,6 +193,9 @@ class SRGANModel(BaseModel):
             pred_d_fake = self.netD(self.fake_H.detach())
             l_d_fake = self.cri_gan(pred_d_fake - torch.mean(pred_d_real.detach()), False) * 0.5
             l_d_fake.backward()
+        else:
+            raise NotImplementedError(
+                f"GAN type {self.opt['train']['gan_type']} not implemented, use gan or ragan")
         self.optimizer_D.step()
 
         # set log
