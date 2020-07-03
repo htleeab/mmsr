@@ -23,7 +23,7 @@ def _get_paths_from_images(path):
     """get image path list from image folder"""
     assert os.path.isdir(path), '{:s} is not a valid directory'.format(path)
     images = []
-    for dirpath, _, fnames in sorted(os.walk(path)):
+    for dirpath, _, fnames in sorted(os.walk(path, followlinks=True)):
         for fname in sorted(fnames):
             if is_image_file(fname):
                 img_path = os.path.join(dirpath, fname)
@@ -106,7 +106,7 @@ def read_img_seq(path):
     img_l = [read_img(None, v) for v in img_path_l]
     # stack to Torch tensor
     imgs = np.stack(img_l, axis=0)
-    imgs = imgs[:, :, :, [2, 1, 0]]
+    imgs = imgs[:, :, :, ::-1]
     imgs = torch.from_numpy(np.ascontiguousarray(np.transpose(imgs, (0, 3, 1, 2)))).float()
     return imgs
 
